@@ -1,114 +1,121 @@
 import streamlit as st
 import pandas as pd
-import os
+import plotly.express as px
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import datetime
 
-# =============================================================================
-# [천도글라스 마스터 V50.0] : 모바일 & 태블릿 전용 (WEB)
-# =============================================================================
+# --- 화면 설정 ---
+st.set_page_config(page_title="천도 실리콘 자재관리", layout="wide", page_icon="🏗️")
 
-# 1. 페이지 설정 (넓게 보기, 제목 설정)
-st.set_page_config(page_title="천도글라스 마스터", layout="wide")
-
-# 2. 스타일 꾸미기 (CSS)
+# --- 스타일(디자인) 설정 ---
 st.markdown("""
     <style>
-    .main { background-color: #f8f9fa; }
-    div[data-testid="stMetricValue"] { font-size: 20px; }
+    div[data-testid="metric-container"] {
+        background-color: #ffffff; border: 1px solid #ddd; border-radius: 10px; padding: 15px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# 3. 데이터 로드 함수
-@st.cache_data # 속도 향상을 위해 데이터 기억하기
-def load_data():
-    file_path = 'glass_data.xlsx'
-    if not os.path.exists(file_path):
+# --- 구글 시트 연결 (열쇠 사용) ---
+@st.cache_resource
+def init_connection():
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    try:
+        # secrets.json 파일을 찾아서 열쇠로 씁니다
+        creds = ServiceAccountCredentials.from_json_keyfile_name('secrets.json', scope)
+        client = gspread.authorize(creds)
+        return client
+    except:
         return None
-    
-    df = pd.read_excel(file_path, engine='openpyxl')
-    df.fillna('', inplace=True)
-    
-    # 숫자 변환
-    cols_to_fix = ['열관류율', '투과율', '반사율', 'SC', 'SHGC']
-    for col in cols_to_fix:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-        
-    return df
 
-# 4. 메인 화면 시작
-st.title("🏙️ 천도글라스 마스터 (Mobile)")
-st.caption("Cheondo Glass High-Performance Search System")
+# --- 데이터 읽어오기 ---
+def load_data():
+    client = init_connection()
+    if client is None: return None
+    try:
+        # 구글 시트 이름이 'silicon_db'여야 합니다
+        sheet = client.open("silicon_db").sheet1
+        return pd.DataFrame(sheet.get_all_records())
+    except: return None
+
+# --- 재고 수정하기 (입고/출고) ---
+def update_stock(product, qty, type='in'):
+    client = init_connection()
+    sheet = client.open("silicon_db").sheet1
+    data = sheet.get_all_records()
+    df = pd.DataFrame(data)
+    
+    # 엑셀에서 제품 찾기
+    idx = df[df['제품명'] == product].index
+    if len(idx) > 0:
+        row = idx[0] + 2 # 엑셀 행 번호 계산
+        current = df.loc[idx[0], '현재고']
+        
+        # 더하기 빼기 계산
+        if type == 'in':
+            new_val = current + qty
+        else:
+            new_val = current - qty
+            
+        # 엑셀 파일 업데이트 (4번째 칸 = D열)
+        sheet.update_cell(row, 4, int(new_val))
+        return True
+    return False
+
+# --- 메인 화면 시작 ---
+st.title("🏗️ 천도글라스 실리콘 마스터")
+st.caption("구글 시트 실시간 연동 시스템")
 
 df = load_data()
 
+# 연결 실패시 에러 메시지
 if df is None:
-    st.error("❌ 'glass_data.xlsx' 파일이 서버에 없습니다.")
+    st.error("🚨 연결 실패!")
+    st.write("1. 깃허브에 secrets.json 파일이 있는지 확인하세요.")
+    st.write("2. 구글 시트 이름이 'silicon_db' 인지 확인하세요.")
+    st.write("3. 구글 시트 [공유] 버튼을 눌러 로봇 이메일을 초대했는지 확인하세요.")
     st.stop()
 
-# --- 사이드바 (검색 필터) ---
-with st.sidebar:
-    st.header("🔍 검색 조건")
+# --- 대시보드 (카드) ---
+c1, c2, c3 = st.columns(3)
+c1.metric("총 재고", f"{df['현재고'].sum()} Box")
+# 단가와 현재고를 곱해서 자산가치 계산
+total_asset = (pd.to_numeric(df['단가']) * pd.to_numeric(df['현재고'])).sum()
+c2.metric("총 자산 가치", f"{total_asset:,.0f} 원")
+c3.metric("부족 품목", f"{len(df[df['현재고'] <= df['안전재고']])} 건")
+
+st.divider()
+
+# --- 탭 화면 (조회 / 입력) ---
+t1, t2 = st.tabs(["📊 재고 현황", "⚡ 입출고 입력"])
+
+with t1:
+    col1, col2 = st.columns([2,1])
+    col1.dataframe(df, use_container_width=True)
+    if not df.empty:
+        fig = px.pie(df, values='현재고', names='색상', title="색상별 재고")
+        col2.plotly_chart(fig, use_container_width=True)
+
+with t2:
+    cc1, cc2 = st.columns(2)
     
-    # 브랜드 선택
-    brand_list = ["전체"] + sorted(df['브랜드'].unique().tolist())
-    f_brand = st.selectbox("브랜드", brand_list)
-    
-    # 두께 선택
-    thick_list = ["전체"] + sorted(df['두께'].unique().tolist())
-    f_thick = st.selectbox("두께", thick_list)
-    
-    # 수치 입력
-    f_u_max = st.number_input("열관류율 (Max)", value=9.9, step=0.1)
-    f_t_min = st.number_input("투과율 (Min)", value=0.0, step=1.0)
-    
-    st.info(f"총 데이터: {len(df)}건")
+    # [입고 화면]
+    with cc1:
+        st.info("📦 입고 (자재 구매)")
+        in_name = st.selectbox("어떤 제품인가요?", df['제품명'], key='in_sb')
+        in_qty = st.number_input("몇 박스 들어왔나요?", min_value=1, key='in_qty')
+        if st.button("입고 등록"):
+            if update_stock(in_name, in_qty, 'in'):
+                st.success("처리 완료! (새로고침 됩니다)")
+                st.rerun()
 
-# --- 데이터 필터링 ---
-filtered_df = df.copy()
-
-if f_brand != "전체":
-    filtered_df = filtered_df[filtered_df['브랜드'] == f_brand]
-    
-if f_thick != "전체":
-    filtered_df = filtered_df[filtered_df['두께'] == f_thick]
-
-# 수치 필터 (0.0 포함 or 이하)
-filtered_df = filtered_df[
-    ((filtered_df['열관류율'] <= f_u_max) | (filtered_df['열관류율'] == 0)) &
-    (filtered_df['투과율'] >= f_t_min)
-]
-
-# --- 결과 표시 ---
-st.subheader(f"📊 검색 결과: {len(filtered_df)}건")
-
-if not filtered_df.empty:
-    # 보기 좋게 컬럼 정리
-    display_cols = ['브랜드', '두께', '공식', '모델명', '가스', '열관류율', '투과율', '반사율', 'SC', 'SHGC']
-    final_df = filtered_df[display_cols].copy()
-
-    # ★ 색상 입히기 (스타일링)
-    def highlight_rows(row):
-        styles = [''] * len(row)
-        
-        # 브랜드 컬러
-        if row['브랜드'] == 'LX':
-            styles[0] = 'color: red; font-weight: bold;'
-        elif row['브랜드'] == 'KCC':
-            styles[0] = 'color: blue; font-weight: bold;'
-            
-        # 프리미엄 (1.0 이하) - 전체 행 초록 배경
-        if 0 < row['열관류율'] <= 1.0:
-            return ['background-color: #d5f5e3; color: black'] * len(row)
-            
-        return styles
-
-    # 열관류율 0.0은 '-'로 표시하기 위해 문자열로 변환 (화면 표시용)
-    # (주의: 스타일링 적용을 위해 숫자 유지하고 포맷팅으로 처리)
-    
-    st.dataframe(
-        final_df.style.apply(highlight_rows, axis=1)
-        .format({"열관류율": "{:.2f}", "투과율": "{:.1f}", "반사율": "{:.1f}", "SC": "{:.2f}", "SHGC": "{:.2f}"}),
-        use_container_width=True,
-        height=600
-    )
-else:
-    st.warning("검색 결과가 없습니다.")
+    # [출고 화면]
+    with cc2:
+        st.error("🚀 출고 (현장 사용)")
+        out_name = st.selectbox("어떤 제품인가요?", df['제품명'], key='out_sb')
+        out_qty = st.number_input("몇 박스 썼나요?", min_value=1, key='out_qty')
+        if st.button("출고 등록"):
+            if update_stock(out_name, out_qty, 'out'):
+                st.success("처리 완료! (새로고침 됩니다)")
+                st.rerun()
