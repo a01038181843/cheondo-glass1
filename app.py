@@ -1,48 +1,69 @@
 import streamlit as st
 import pandas as pd
+from streamlit_gsheets import GSheetsConnection
 
-# 설정
+# 1. 화면 설정
 st.set_page_config(page_title="천도 실리콘 관리", layout="wide")
-st.title("🏗️ 천도글라스 실리콘 마스터 (v4.1)")
+st.title("🏗️ 천도글라스 실리콘 마스터 (입력 기능 복구)")
 
-# 대표님 구글 시트 정보 (주소에서 ID만 추출)
-SHEET_ID = "193becb8J4mpt1ruYvoZobtJ3I9KCVRjXh8OxzlgYzco"
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+# 2. 구글 시트 연결 (가장 안정적인 최신 방식)
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-@st.cache_data(ttl=0)
 def load_data():
-    try:
-        # 보안 파일 없이 링크 권한으로 데이터를 읽어옵니다.
-        return pd.read_csv(CSV_URL)
-    except Exception as e:
-        st.error(f"데이터 로드 실패: {e}")
-        return pd.DataFrame()
+    # 데이터를 읽어옵니다.
+    return conn.read(ttl=0).dropna(how='all')
 
 df = load_data()
 
-# 화면 구성 (조회와 입출고 가이드)
-tab1, tab2 = st.tabs(["📊 재고 현황", "⚡ 입출고 관리"])
+# 3. 화면 구성 (탭)
+tab1, tab2, tab3 = st.tabs(["📊 재고 현황", "⚡ 입출고 입력", "⚙️ 제품 관리"])
 
+# --- 탭1: 재고 현황 ---
 with tab1:
-    st.subheader("현재 창고 재고 현황")
+    st.subheader("현재 창고 재고")
     if not df.empty:
-        # 검색 기능 추가
-        search = st.text_input("🔍 제품명 또는 색상 검색")
-        if search:
-            df = df[df.apply(lambda row: search.lower() in row.astype(str).str.lower().values, axis=1)]
         st.dataframe(df, use_container_width=True, hide_index=True)
-    else:
-        st.warning("시트에 데이터가 없거나 접근 권한이 없습니다.")
 
+# --- 탭2: 입출고 입력 (대표님이 원하신 바로 그 기능!) ---
 with tab2:
-    st.subheader("⚡ 실시간 입출고 및 제품 관리")
-    st.info("💡 보안 에러를 원천 차단하기 위해, 아래 '장부 열기' 버튼을 눌러 숫자를 수정해 주세요.")
-    st.write("1. 아래 버튼을 눌러 **구글 시트(장부)**를 엽니다.")
-    st.write("2. '현재고' 칸의 숫자를 바꾸거나 맨 아래 줄에 새 제품을 적습니다.")
-    st.write("3. 앱으로 돌아와서 **새로고침(F5)**을 누르면 즉시 반영됩니다.")
-    
-    # 구글 시트로 바로가는 큰 버튼
-    st.link_button("📂 천도글라스 실리콘 장부 열기", f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit")
-    
-    st.divider()
-    st.warning("⚠️ 주의: 장부에서 '제목 줄(1행)'은 절대 건드리지 마세요!")
+    st.subheader("앱에서 바로 입출고 기록")
+    if not df.empty:
+        with st.form("inout_form"):
+            # 제품명과 색상을 합쳐서 선택창을 만듭니다.
+            df['display'] = df['제품명'].astype(str) + " (" + df['색상'].astype(str) + ")"
+            selected = st.selectbox("품목 선택", df['display'])
+            mode = st.radio("작업 구분", ["📦 입고", "📤 출고"], horizontal=True)
+            qty = st.number_input("박스 수량", min_value=1, step=1)
+            
+            if st.form_submit_button("장부 기록하기"):
+                idx = df[df['display'] == selected].index[0]
+                # 숫자 계산
+                current_stock = int(df.at[idx, '현재고'])
+                if mode == "📦 입고":
+                    df.at[idx, '현재고'] = current_stock + qty
+                else:
+                    df.at[idx, '현재고'] = current_stock - qty
+                
+                # 시트에 즉시 반영 (임시 열 제거 후 업데이트)
+                updated_df = df.drop(columns=['display'])
+                conn.update(data=updated_df)
+                st.success(f"✅ {selected} {qty}박스 {mode} 완료!")
+                st.rerun()
+
+# --- 탭3: 제품 등록 ---
+with tab3:
+    st.subheader("🆕 신규 제품 등록")
+    with st.form("add_product"):
+        c1, c2 = st.columns(2)
+        p_name = c1.text_input("제품명")
+        p_color = c1.text_input("색상")
+        p_stock = c2.number_input("초기 재고", min_value=0)
+        p_price = c2.number_input("단가", min_value=0)
+        
+        if st.form_submit_button("제품 추가"):
+            if p_name and p_color:
+                new_row = pd.DataFrame([{"제품명": p_name, "색상": p_color, "용도": "기타", "현재고": p_stock, "단가": p_price, "안전재고": 10}])
+                final_df = pd.concat([df.drop(columns=['display'], errors='ignore'), new_row], ignore_index=True)
+                conn.update(data=final_df)
+                st.success("새 제품이 등록되었습니다!")
+                st.rerun()
