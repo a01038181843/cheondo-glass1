@@ -1,121 +1,107 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import plotly.express as px
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import datetime
+from datetime import datetime
 
-# --- 화면 설정 ---
-st.set_page_config(page_title="천도 실리콘 자재관리", layout="wide", page_icon="🏗️")
+# 페이지 설정
+st.set_page_config(page_title="천도글라스 실리콘 마스터", layout="wide")
 
-# --- 스타일(디자인) 설정 ---
-st.markdown("""
-    <style>
-    div[data-testid="metric-container"] {
-        background-color: #ffffff; border: 1px solid #ddd; border-radius: 10px; padding: 15px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+st.title("🏗️ 천도글라스 실리콘 마스터 (v2.0)")
+st.caption("실시간 재고 관리 및 제품 관리 시스템")
 
-# --- 구글 시트 연결 (열쇠 사용) ---
-@st.cache_resource
-def init_connection():
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    try:
-        # secrets.json 파일을 찾아서 열쇠로 씁니다
-        creds = ServiceAccountCredentials.from_json_keyfile_name('secrets.json', scope)
-        client = gspread.authorize(creds)
-        return client
-    except:
-        return None
+# 구글 시트 연결
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- 데이터 읽어오기 ---
+# 데이터 불러오기 함수
 def load_data():
-    client = init_connection()
-    if client is None: return None
-    try:
-        # 구글 시트 이름이 'silicon_db'여야 합니다
-        sheet = client.open("silicon_db").sheet1
-        return pd.DataFrame(sheet.get_all_records())
-    except: return None
-
-# --- 재고 수정하기 (입고/출고) ---
-def update_stock(product, qty, type='in'):
-    client = init_connection()
-    sheet = client.open("silicon_db").sheet1
-    data = sheet.get_all_records()
-    df = pd.DataFrame(data)
-    
-    # 엑셀에서 제품 찾기
-    idx = df[df['제품명'] == product].index
-    if len(idx) > 0:
-        row = idx[0] + 2 # 엑셀 행 번호 계산
-        current = df.loc[idx[0], '현재고']
-        
-        # 더하기 빼기 계산
-        if type == 'in':
-            new_val = current + qty
-        else:
-            new_val = current - qty
-            
-        # 엑셀 파일 업데이트 (4번째 칸 = D열)
-        sheet.update_cell(row, 4, int(new_val))
-        return True
-    return False
-
-# --- 메인 화면 시작 ---
-st.title("🏗️ 천도글라스 실리콘 마스터")
-st.caption("구글 시트 실시간 연동 시스템")
+    return conn.read(ttl=0)
 
 df = load_data()
 
-# 연결 실패시 에러 메시지
-if df is None:
-    st.error("🚨 연결 실패!")
-    st.write("1. 깃허브에 secrets.json 파일이 있는지 확인하세요.")
-    st.write("2. 구글 시트 이름이 'silicon_db' 인지 확인하세요.")
-    st.write("3. 구글 시트 [공유] 버튼을 눌러 로봇 이메일을 초대했는지 확인하세요.")
-    st.stop()
+# 상단 메뉴 (탭 구성)
+tab1, tab2, tab3 = st.tabs(["📊 재고 현황", "⚡ 입출고 입력", "⚙️ 제품 등록/관리"])
 
-# --- 대시보드 (카드) ---
-c1, c2, c3 = st.columns(3)
-c1.metric("총 재고", f"{df['현재고'].sum()} Box")
-# 단가와 현재고를 곱해서 자산가치 계산
-total_asset = (pd.to_numeric(df['단가']) * pd.to_numeric(df['현재고'])).sum()
-c2.metric("총 자산 가치", f"{total_asset:,.0f} 원")
-c3.metric("부족 품목", f"{len(df[df['현재고'] <= df['안전재고']])} 건")
-
-st.divider()
-
-# --- 탭 화면 (조회 / 입력) ---
-t1, t2 = st.tabs(["📊 재고 현황", "⚡ 입출고 입력"])
-
-with t1:
-    col1, col2 = st.columns([2,1])
-    col1.dataframe(df, use_container_width=True)
+# --- TAB 1: 재고 현황 ---
+with tab1:
+    st.subheader("실시간 재고 목록")
     if not df.empty:
-        fig = px.pie(df, values='현재고', names='색상', title="색상별 재고")
-        col2.plotly_chart(fig, use_container_width=True)
+        # 검색 및 필터
+        search = st.text_input("🔍 제품명 또는 색상 검색")
+        filtered_df = df[df.apply(lambda row: search.lower() in row.astype(str).str.lower().values, axis=1)]
+        
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("등록된 제품이 없습니다. '제품 등록' 탭에서 새 제품을 추가하세요.")
 
-with t2:
-    cc1, cc2 = st.columns(2)
-    
-    # [입고 화면]
-    with cc1:
-        st.info("📦 입고 (자재 구매)")
-        in_name = st.selectbox("어떤 제품인가요?", df['제품명'], key='in_sb')
-        in_qty = st.number_input("몇 박스 들어왔나요?", min_value=1, key='in_qty')
-        if st.button("입고 등록"):
-            if update_stock(in_name, in_qty, 'in'):
-                st.success("처리 완료! (새로고침 됩니다)")
+# --- TAB 2: 입출고 입력 ---
+with tab2:
+    st.subheader("빠른 입출고 기록")
+    if not df.empty:
+        with st.form("log_form"):
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                item = st.selectbox("품목 선택", df['제품명'] + " (" + df['색상'] + ")")
+            with col2:
+                mode = st.radio("구분", ["📦 입고", "📤 출고"], horizontal=True)
+            with col3:
+                qty = st.number_input("수량(Box)", min_value=1, step=1)
+            
+            submit = st.form_submit_button("기록하기")
+            
+            if submit:
+                # 데이터 업데이트 로직
+                idx = df[df['제품명'] + " (" + df['색상'] + ")" == item].index[0]
+                if mode == "📦 입고":
+                    df.at[idx, '현재고'] += qty
+                else:
+                    df.at[idx, '현재고'] -= qty
+                
+                conn.update(data=df)
+                st.success(f"{item} {qty}박스 {mode} 완료!")
                 st.rerun()
+    else:
+        st.warning("먼저 제품을 등록해야 입출고가 가능합니다.")
 
-    # [출고 화면]
-    with cc2:
-        st.error("🚀 출고 (현장 사용)")
-        out_name = st.selectbox("어떤 제품인가요?", df['제품명'], key='out_sb')
-        out_qty = st.number_input("몇 박스 썼나요?", min_value=1, key='out_qty')
-        if st.button("출고 등록"):
-            if update_stock(out_name, out_qty, 'out'):
-                st.success("처리 완료! (새로고침 됩니다)")
+# --- TAB 3: 제품 등록/관리 (대표님이 원하신 기능!) ---
+with tab3:
+    st.subheader("🆕 새 제품 등록")
+    with st.form("new_item_form"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            new_name = st.text_input("제품명 (예: 다우 1001)")
+            new_color = st.text_input("색상 (예: 백색)")
+        with c2:
+            new_type = st.selectbox("용도", ["내부용", "외부용", "구조용", "기타"])
+            new_stock = st.number_input("초기 재고(Box)", min_value=0, step=1)
+        with c3:
+            new_price = st.number_input("단가(원)", min_value=0, step=100)
+            new_safe = st.number_input("안전 재고(Box)", min_value=0, step=1)
+            
+        add_btn = st.form_submit_button("제품 추가하기")
+        
+        if add_btn:
+            if new_name and new_color:
+                new_data = pd.DataFrame([{
+                    "제품명": new_name,
+                    "색상": new_color,
+                    "용도": new_type,
+                    "현재고": new_stock,
+                    "단가": new_price,
+                    "안전재고": new_safe
+                }])
+                updated_df = pd.concat([df, new_data], ignore_index=True)
+                conn.update(data=updated_df)
+                st.success(f"'{new_name}({new_color})' 제품이 등록되었습니다!")
                 st.rerun()
+            else:
+                st.error("제품명과 색상은 필수 입력 사항입니다.")
+
+    st.divider()
+    st.subheader("🗑️ 제품 삭제")
+    if not df.empty:
+        del_item = st.selectbox("삭제할 제품 선택", df['제품명'] + " (" + df['색상'] + ")", key="del")
+        if st.button("선택한 제품 영구 삭제", type="primary"):
+            df = df[df['제품명'] + " (" + df['색상'] + ")" != del_item]
+            conn.update(data=df)
+            st.success("삭제되었습니다.")
+            st.rerun()
